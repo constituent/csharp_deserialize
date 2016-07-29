@@ -28,6 +28,26 @@ use records::*;
 fn main() {
 	use records::RecordTypeEnumeration::*;
 
+	let parse_bool = |value: &Box<Value>| {
+			JValue::Bool(*value.as_any().downcast_ref::<bool>().unwrap())
+		};
+		let parse_i32 = |value: &Box<Value>| {
+			JValue::I64(*value.as_any().downcast_ref::<i32>().unwrap() as i64)
+		};
+		let parse_f32 = |value: &Box<Value>| {
+			JValue::F64(*value.as_any().downcast_ref::<f32>().unwrap() as f64)
+		};
+		let parse_u64 = |value: &Box<Value>| {
+			JValue::U64(*value.as_any().downcast_ref::<u64>().unwrap())
+		};
+		
+		let parse_MemberReferenceRecord_or_ObjectNullRecord = |value: &Box<Value>| {
+			match value.as_any().downcast_ref::<MemberReferenceRecord>() {
+				Some(mem_ref) => to_value(mem_ref),
+				None => JValue::Null,
+			}
+		};
+
 	for path_str in std::env::args().skip(1) {
 		let path = Path::new(&path_str);
 		if path.extension().unwrap() != "bytes" {
@@ -130,26 +150,6 @@ fn main() {
 			}
 		};
 
-
-		let parse_bool = |value: &Box<Value>| {
-			JValue::Bool(*value.as_any().downcast_ref::<bool>().unwrap())
-		};
-		let parse_i32 = |value: &Box<Value>| {
-			JValue::I64(*value.as_any().downcast_ref::<i32>().unwrap() as i64)
-		};
-		let parse_f32 = |value: &Box<Value>| {
-			JValue::F64(*value.as_any().downcast_ref::<f32>().unwrap() as f64)
-		};
-		let parse_u64 = |value: &Box<Value>| {
-			JValue::U64(*value.as_any().downcast_ref::<u64>().unwrap())
-		};
-		
-		let parse_MemberReferenceRecord_or_ObjectNullRecord = |value: &Box<Value>| {
-			match value.as_any().downcast_ref::<MemberReferenceRecord>() {
-				Some(mem_ref) => to_value(mem_ref),
-				None => JValue::Null,
-			}
-		};
 		let parse_String = |value: &Box<Value>| {
 			// Try BinaryObjectStringRecord first as it seems more
 			match value.as_any().downcast_ref::<BinaryObjectStringRecord>() {
@@ -173,7 +173,6 @@ fn main() {
 				}
 			}
 		};
-
 
 		let create_parse_class_vec = |binary_types, additional_infos: &Vec<Option<Box<AdditionalInfo>>>| {
 			let mut parse_class_vec: Vec<Box<Fn(&Box<Value>) -> JValue>> = vec![];
