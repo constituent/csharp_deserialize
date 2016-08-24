@@ -6,21 +6,23 @@ use std::io::prelude::*;
 use std::collections::HashMap;
 
 use byteorder::ReadBytesExt;
+use itertools::Zip;
 
 pub use sub_records::*;
 
 
-pub trait Value: std::fmt::Debug { fn as_any(&self) -> &Any; }
-impl Value for bool { fn as_any(&self) -> &Any { self } }
-impl Value for i32 { fn as_any(&self) -> &Any { self } }
-impl Value for f32 { fn as_any(&self) -> &Any { self } }
-impl Value for u64 { fn as_any(&self) -> &Any { self } }
-impl Value for MemberReferenceRecord { fn as_any(&self) -> &Any { self } }
-impl Value for ObjectNullRecord { fn as_any(&self) -> &Any { self } }
-impl Value for BinaryObjectStringRecord { fn as_any(&self) -> &Any { self } }
-impl Value for ArraySinglePrimitiveRecord { fn as_any(&self) -> &Any { self } }
+pub trait Value { fn as_any_value(&self) -> &Any; }
+impl Value for bool { fn as_any_value(&self) -> &Any { self } }
+impl Value for i32 { fn as_any_value(&self) -> &Any { self } }
+impl Value for f32 { fn as_any_value(&self) -> &Any { self } }
+impl Value for u64 { fn as_any_value(&self) -> &Any { self } }
+impl Value for MemberReferenceRecord { fn as_any_value(&self) -> &Any { self } }
+impl Value for ObjectNullRecord { fn as_any_value(&self) -> &Any { self } }
+impl Value for BinaryObjectStringRecord { fn as_any_value(&self) -> &Any { self } }
+impl Value for ArraySinglePrimitiveRecord { fn as_any_value(&self) -> &Any { self } }
 
-pub trait Record: std::fmt::Debug {
+pub trait Record {
+	fn new(file: &mut File) -> Self where Self: Sized;
 	fn get_record_type_value() -> u8 where Self: Sized;
 }
 
@@ -69,8 +71,8 @@ pub struct SerializationHeaderRecord {
 	MinorVersion: i32,
 }
 
-impl SerializationHeaderRecord {
-	pub fn new(file: &mut File) -> Self {
+impl Record for SerializationHeaderRecord {
+	fn new(file: &mut File) -> Self {
 		SerializationHeaderRecord {
 			RootId: read_l_i32(file),
 			HeaderId: read_l_i32(file),
@@ -78,9 +80,6 @@ impl SerializationHeaderRecord {
 			MinorVersion: read_l_i32(file),
 		}
 	}
-}
-
-impl Record for SerializationHeaderRecord {
 	fn get_record_type_value() -> u8 {
 		0
 	}
@@ -92,35 +91,107 @@ pub struct ClassWithIdRecord {
 	pub MetadataId: i32,
 }
 
-impl ClassWithIdRecord {
-	pub fn new(file: &mut File) -> Self {
+impl Record for ClassWithIdRecord {
+	fn new(file: &mut File) -> Self {
 		ClassWithIdRecord {
 			ObjectId: read_l_i32(file),
 			MetadataId: read_l_i32(file),
 		}
 	}
-}
-
-impl Record for ClassWithIdRecord {
 	fn get_record_type_value() -> u8 {
 		1
 	}
 }
 
-#[derive(Debug)]
-pub enum ClassRecordForClassWithId {
-	SystemClassWithMembersAndTypesRecord(SystemClassWithMembersAndTypesRecord),
-	ClassWithMembersAndTypesRecord(ClassWithMembersAndTypesRecord),
+pub trait ClassRecordForClassWithId {
+	fn get_member_info(&self) -> (&MemberTypeInfoRecord, usize);
+	fn get_info_for_json(&self) -> (String, &Vec<String>, &Vec<BinaryTypeEnumeration>, &Vec<Option<Box<AdditionalInfo>>>);
+	fn read_value(&self, file: &mut File, string_map: &mut HashMap<i32, *const String>) -> Vec<Box<Value>> {
+		use sub_records::BinaryTypeEnumeration::*;
+
+		let (member_type_info, member_count) = self.get_member_info();
+		let mut values: Vec<Box<Value>> = Vec::with_capacity(member_count);
+
+		for (binary_type, additional_info) in Zip::new((&member_type_info.BinaryTypeEnums, &member_type_info.AdditionalInfos)) {
+			values.push(
+				match binary_type {
+					&Primitive => {
+						match additional_info.as_ref().unwrap().as_any_ai().downcast_ref::<PrimitiveTypeEnumeration>().unwrap() {
+							&PrimitiveTypeEnumeration::Boolean => {
+								box(file.read_u8().unwrap() == 1)
+							}
+							&PrimitiveTypeEnumeration::Int32 => {
+								box(read_l_i32(file))
+							},
+							&PrimitiveTypeEnumeration::Single => {
+								box(read_l_f32(file))
+							},
+							&PrimitiveTypeEnumeration::UInt64 => {
+								box(read_l_u64(file))
+							},
+							s @ _ => panic!("Unprocessed PrimitiveType: {:?}", s),
+						}
+					},
+					&String => {
+						match RecordTypeEnumeration::from(file.read_u8().unwrap()) {
+							RecordTypeEnumeration::BinaryObjectString => {
+								let boxed_string = box(BinaryObjectStringRecord::new(file));
+								let raw_s: *const _ = &boxed_string.Value;
+								string_map.insert(boxed_string.ObjectId, raw_s);
+								boxed_string
+							}
+							RecordTypeEnumeration::MemberReference => {
+								box(MemberReferenceRecord::new(file))
+							}
+							RecordTypeEnumeration::ObjectNull => {
+								box(ObjectNullRecord::new(file))
+							}
+							s @ _ => {
+								println!("pos: {:?}", file.seek(std::io::SeekFrom::Current(0)));
+								panic!("Unprocessed ValueTypeEnum: {:?}", s);
+							}
+						}
+					},
+					t @ &Class | t @ &SystemClass | t @ &PrimitiveArray | t @ &StringArray => {
+						match RecordTypeEnumeration::from(file.read_u8().unwrap()) {
+							RecordTypeEnumeration::MemberReference => {
+								box(MemberReferenceRecord::new(file))
+							}
+							RecordTypeEnumeration::ObjectNull => {
+								box(ObjectNullRecord::new(file))
+							}
+							s @ _ => panic!("Unprocessed ValueTypeEnum: {:?} of {:?}", s, t),
+						}
+					},
+					s @ _ => {
+						println!("pos: {:?}", file.seek(std::io::SeekFrom::Current(0)));
+						panic!("Unprocessed BinaryTypeEnums: {:?}", s); 	
+					}
+				}
+			);
+		}
+		values
+	}
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct SystemClassWithMembersAndTypesRecord {
 	pub ClassInfo: ClassInfoRecord,
 	pub MemberTypeInfo: MemberTypeInfoRecord,
 }
 
-impl SystemClassWithMembersAndTypesRecord {
-	pub fn new(file: &mut File) -> Self {
+impl ClassRecordForClassWithId for SystemClassWithMembersAndTypesRecord {
+	fn get_member_info(&self) -> (&MemberTypeInfoRecord, usize) {
+		(&self.MemberTypeInfo, self.ClassInfo.MemberCount as usize)
+	}
+	fn get_info_for_json(&self) -> (String, &Vec<String>, &Vec<BinaryTypeEnumeration>, &Vec<Option<Box<AdditionalInfo>>>) {
+		(self.ClassInfo.Name.clone(), &self.ClassInfo.MemberNames, &self.MemberTypeInfo.BinaryTypeEnums, 
+			&self.MemberTypeInfo.AdditionalInfos)
+	}
+}
+
+impl Record for SystemClassWithMembersAndTypesRecord {
+	fn new(file: &mut File) -> Self {
 		let class_info = ClassInfoRecord::new(file);
 		let member_count = class_info.MemberCount as usize;
 		let member_type_info = MemberTypeInfoRecord::new(file, member_count);
@@ -129,23 +200,30 @@ impl SystemClassWithMembersAndTypesRecord {
 			MemberTypeInfo: member_type_info,
 		}
 	}
-}
-
-impl Record for SystemClassWithMembersAndTypesRecord {
 	fn get_record_type_value() -> u8 {
 		4
 	}
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct ClassWithMembersAndTypesRecord {
 	pub ClassInfo: ClassInfoRecord,
 	pub MemberTypeInfo: MemberTypeInfoRecord,
 	LibraryId: i32,
 }
 
-impl ClassWithMembersAndTypesRecord {
-	pub fn new(file: &mut File) -> Self {
+impl ClassRecordForClassWithId for ClassWithMembersAndTypesRecord {
+	fn get_member_info(&self) -> (&MemberTypeInfoRecord, usize) {
+		(&self.MemberTypeInfo, self.ClassInfo.MemberCount as usize)
+	}
+	fn get_info_for_json(&self) -> (String, &Vec<String>, &Vec<BinaryTypeEnumeration>, &Vec<Option<Box<AdditionalInfo>>>) {
+		(self.ClassInfo.Name.clone(), &self.ClassInfo.MemberNames, &self.MemberTypeInfo.BinaryTypeEnums, 
+			&self.MemberTypeInfo.AdditionalInfos)
+	}
+}
+
+impl Record for ClassWithMembersAndTypesRecord {
+	fn new(file: &mut File) -> Self {
 		let class_info = ClassInfoRecord::new(file);
 		let member_count = class_info.MemberCount as usize;
 		let member_type_info = MemberTypeInfoRecord::new(file, member_count);
@@ -156,9 +234,6 @@ impl ClassWithMembersAndTypesRecord {
 			LibraryId: read_l_i32(file),
 		}
 	}
-}
-
-impl Record for ClassWithMembersAndTypesRecord {
 	fn get_record_type_value() -> u8 {
 		5
 	}
@@ -170,15 +245,14 @@ pub struct BinaryObjectStringRecord {
 	pub Value: String,
 }
 
-impl BinaryObjectStringRecord {
-	pub fn new(file: &mut File) -> Self {
+
+impl Record for BinaryObjectStringRecord {
+	fn new(file: &mut File) -> Self {
 		BinaryObjectStringRecord {
 			ObjectId: read_l_i32(file),
 			Value: read_LengthPrefixedString(file),
 		}
 	}
-}
-impl Record for BinaryObjectStringRecord {
 	fn get_record_type_value() -> u8 {
 		6
 	}
@@ -195,8 +269,8 @@ pub struct BinaryArrayRecord {
 	AdditionalTypeInfo: Option<Box<AdditionalInfo>>,
 }
 
-impl BinaryArrayRecord {
-	pub fn new(file: &mut File) -> Self {
+impl Record for BinaryArrayRecord {
+	fn new(file: &mut File) -> Self {
 		use sub_records::BinaryArrayTypeEnumeration::*;
 
 		let oi = read_l_i32(file);
@@ -237,9 +311,6 @@ impl BinaryArrayRecord {
 			AdditionalTypeInfo: ati,
 		}
 	}
-}
-
-impl Record for BinaryArrayRecord {
 	fn get_record_type_value() -> u8 {
 		7
 	}
@@ -250,15 +321,13 @@ pub struct MemberReferenceRecord {
 	pub IdRef: i32,
 }
 
-impl MemberReferenceRecord {
-	pub fn new(file: &mut File) -> Self {
+
+impl Record for MemberReferenceRecord {
+	fn new(file: &mut File) -> Self {
 		MemberReferenceRecord {
 			IdRef: read_l_i32(file),
 		}
 	}
-}
-
-impl Record for MemberReferenceRecord {
 	fn get_record_type_value() -> u8 {
 		9
 	}
@@ -267,12 +336,11 @@ impl Record for MemberReferenceRecord {
 #[derive(Debug)]
 pub struct ObjectNullRecord {}
 
-impl ObjectNullRecord {
-	pub fn new() -> Self {
+impl Record for ObjectNullRecord {
+	#[allow(unused_variables)]
+	fn new(file: &mut File) -> Self {
 		ObjectNullRecord {}
 	}
-}
-impl Record for ObjectNullRecord {
 	fn get_record_type_value() -> u8 {
 		10
 	}
@@ -282,12 +350,11 @@ impl Record for ObjectNullRecord {
 #[derive(Debug)]
 pub struct MessageEndRecord {}
 
-impl MessageEndRecord {
-	pub fn new() -> Self {
+impl Record for MessageEndRecord {
+	#[allow(unused_variables)]
+	fn new(file: &mut File) -> Self {
 		MessageEndRecord {}
 	}
-}
-impl Record for MessageEndRecord {
 	fn get_record_type_value() -> u8 {
 		11
 	}
@@ -299,16 +366,13 @@ pub struct BinaryLibraryRecord {
 	LibraryName: String,
 }
 
-impl BinaryLibraryRecord {
-	pub fn new(file: &mut File) -> Self {
+impl Record for BinaryLibraryRecord {
+	fn new(file: &mut File) -> Self {
 		BinaryLibraryRecord {
 			LibraryId: read_l_i32(file),
 			LibraryName: read_LengthPrefixedString(file),
 		}
 	}
-}
-
-impl Record for BinaryLibraryRecord {
 	fn get_record_type_value() -> u8 {
 		12
 	}
@@ -319,15 +383,12 @@ pub struct ObjectNullMultiple256Record {
 	NullCount: u8,
 }
 
-impl ObjectNullMultiple256Record {
-	pub fn new(file: &mut File) -> Self {
+impl Record for ObjectNullMultiple256Record {
+	fn new(file: &mut File) -> Self {
 		ObjectNullMultiple256Record {
 			NullCount: file.read_u8().unwrap(),
 		}
 	}
-}
-
-impl Record for ObjectNullMultiple256Record {
 	fn get_record_type_value() -> u8 {
 		13
 	}
@@ -338,15 +399,12 @@ pub struct ObjectNullMultipleRecord {
 	NullCount: i32,
 }
 
-impl ObjectNullMultipleRecord {
-	pub fn new(file: &mut File) -> Self {
+impl Record for ObjectNullMultipleRecord {
+	fn new(file: &mut File) -> Self {
 		ObjectNullMultipleRecord {
 			NullCount: read_l_i32(file),
 		}
 	}
-}
-
-impl Record for ObjectNullMultipleRecord {
 	fn get_record_type_value() -> u8 {
 		14
 	}
@@ -359,8 +417,8 @@ pub struct ArraySinglePrimitiveRecord {
 	Values: Vec<i32>,
 }
 
-impl ArraySinglePrimitiveRecord {
-	pub fn new(file: &mut File) -> Self {
+impl Record for ArraySinglePrimitiveRecord {
+	fn new(file: &mut File) -> Self {
 		let ai = ArrayInfoRecord::new(file);
 		let pte = PrimitiveTypeEnumeration::from(file.read_u8().unwrap());
 		let v = match pte {
@@ -380,9 +438,6 @@ impl ArraySinglePrimitiveRecord {
 			Values: v,
 		}
 	}
-}
-
-impl Record for ArraySinglePrimitiveRecord {
 	fn get_record_type_value() -> u8 {
 		15
 	}
@@ -393,81 +448,13 @@ pub struct ArraySingleStringRecord {
 	ArrayInfo: ArrayInfoRecord,
 }
 
-impl ArraySingleStringRecord {
-	pub fn new(file: &mut File) -> Self {
+impl Record for ArraySingleStringRecord {
+	fn new(file: &mut File) -> Self {
 		ArraySingleStringRecord {
 			ArrayInfo: ArrayInfoRecord::new(file),
 		}
 	}
-}
-
-impl Record for ArraySingleStringRecord {
 	fn get_record_type_value() -> u8 {
 		17
 	}
-}
-
-pub fn get_value(file: &mut File, member_type_info: &MemberTypeInfoRecord, member_count: usize, string_map: &mut HashMap<i32, String>) -> Vec<Box<Value>> {
-	use sub_records::BinaryTypeEnumeration::*;
-
-	let mut values: Vec<Box<Value>> = Vec::with_capacity(member_count);
-
-	for (binary_type, additional_info) in member_type_info.BinaryTypeEnums.iter().zip(member_type_info.AdditionalInfos.iter()) {
-		values.push(
-			match binary_type {
-				&Primitive => {
-					match additional_info.as_ref().unwrap().as_any().downcast_ref::<PrimitiveTypeEnumeration>().unwrap() {
-						&PrimitiveTypeEnumeration::Boolean => {
-							box(file.read_u8().unwrap() == 1)
-						}
-						&PrimitiveTypeEnumeration::Int32 => {
-							box(read_l_i32(file))
-						},
-						&PrimitiveTypeEnumeration::Single => {
-							box(read_l_f32(file))
-						},
-						&PrimitiveTypeEnumeration::UInt64 => {
-							box(read_l_u64(file))
-						},
-						s @ _ => panic!("Unprocessed PrimitiveType: {:?}", s),
-					}
-				},
-				&String => {
-					match RecordTypeEnumeration::from(file.read_u8().unwrap()) {
-						RecordTypeEnumeration::BinaryObjectString => {
-							let s = BinaryObjectStringRecord::new(file);
-							string_map.insert(s.ObjectId, s.Value.clone());
-							box(s)
-						}
-						RecordTypeEnumeration::MemberReference => {
-							box(MemberReferenceRecord::new(file))
-						}
-						RecordTypeEnumeration::ObjectNull => {
-							box(ObjectNullRecord::new())
-						}
-						s @ _ => {
-							println!("pos: {:?}", file.seek(std::io::SeekFrom::Current(0)));
-							panic!("Unprocessed ValueTypeEnum: {:?}", s);
-						}
-					}
-				},
-				t @ &Class | t @ &SystemClass | t @ &PrimitiveArray | t @ &StringArray => {
-					match RecordTypeEnumeration::from(file.read_u8().unwrap()) {
-						RecordTypeEnumeration::MemberReference => {
-							box(MemberReferenceRecord::new(file))
-						}
-						RecordTypeEnumeration::ObjectNull => {
-							box(ObjectNullRecord::new())
-						}
-						s @ _ => panic!("Unprocessed ValueTypeEnum: {:?} of {:?}", s, t),
-					}
-				},
-				s @ _ => {
-					println!("pos: {:?}", file.seek(std::io::SeekFrom::Current(0)));
-					panic!("Unprocessed BinaryTypeEnums: {:?}", s); 	
-				}
-			}
-		);
-	}
-	values
 }

@@ -10,29 +10,12 @@ pub use util::*;
 // See http://stackoverflow.com/questions/33687447/how-to-get-struct-reference-from-boxed-trait
 // I'd like the default Debug so that AdditionalInfo trait is necessary
 // And as_any cannot be derived yet...
-pub trait AdditionalInfo: std::fmt::Debug + AdditionalInfoClone { fn as_any(&self) -> &Any; }
-impl AdditionalInfo for String { fn as_any(&self) -> &Any { self } }
-impl AdditionalInfo for ClassTypeInfoRecord { fn as_any(&self) -> &Any { self } }
-impl AdditionalInfo for PrimitiveTypeEnumeration { fn as_any(&self) -> &Any { self } }
+pub trait AdditionalInfo: std::fmt::Debug { fn as_any_ai(&self) -> &Any; }
+impl AdditionalInfo for String { fn as_any_ai(&self) -> &Any { self } }
+impl AdditionalInfo for ClassTypeInfoRecord { fn as_any_ai(&self) -> &Any { self } }
+impl AdditionalInfo for PrimitiveTypeEnumeration { fn as_any_ai(&self) -> &Any { self } }
 
-// See http://stackoverflow.com/questions/30353462/how-to-clone-a-struct-storing-a-trait-object
-pub trait AdditionalInfoClone {
-	fn clone_box(&self) -> Box<AdditionalInfo>;
-}
-
-impl<T> AdditionalInfoClone for T where T: 'static + AdditionalInfo + Clone {
-    fn clone_box(&self) -> Box<AdditionalInfo> {
-        Box::new(self.clone())
-    }
-}
-
-impl Clone for Box<AdditionalInfo> {
-    fn clone(&self) -> Box<AdditionalInfo> {
-        self.clone_box()
-    }
-}
-
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct ClassInfoRecord {
 	pub ObjectId: i32,
 	pub Name: String,
@@ -58,7 +41,7 @@ impl ClassInfoRecord {
 	}
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub enum PrimitiveTypeEnumeration {
 	Boolean=1,
 	Byte,
@@ -91,7 +74,7 @@ impl From<u8> for PrimitiveTypeEnumeration {
 	}
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub enum BinaryTypeEnumeration {
 	Primitive,
 	String,
@@ -115,7 +98,7 @@ impl From<u8> for BinaryTypeEnumeration {
 	}
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct ClassTypeInfoRecord {
 	TypeName: String,
 	LibraryId: i32,
@@ -130,7 +113,7 @@ impl ClassTypeInfoRecord {
 	}
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct MemberTypeInfoRecord {
 	pub BinaryTypeEnums: Vec<BinaryTypeEnumeration>,
 	pub AdditionalInfos: Vec<Option<Box<AdditionalInfo>>>,
@@ -199,7 +182,7 @@ impl From<u8> for BinaryArrayTypeEnumeration {
 	}
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct ArrayInfoRecord {
 	ObjectId: i32,
 	pub Length: i32,

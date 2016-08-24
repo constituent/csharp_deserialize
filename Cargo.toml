@@ -1,9 +1,10 @@
 [package]
 name = "csharp_deserialize"
-version = "0.1.0"
+version = "0.1.1"
 authors = ["constituent <wjun7@hotmail.com>"]
 
 [dependencies]
+num = "0.1"
 byteorder = "0.5"
 serde = "*"
 serde_json = "*"
